@@ -1,69 +1,118 @@
-# Mini RAG Stack (Qdrant + Ollama + FastAPI)
+# Self-Hosted RAG Stack (Qdrant + Ollama + FastAPI)
 
-A self-hosted Retrieval-Augmented Generation stack, built to run CPU-only on
-modest hardware. Vector search with **Qdrant**, local LLM + embeddings with
-**Ollama**, and a small **FastAPI** service tying them together.
+A **Retrieval-Augmented Generation** pipeline that runs entirely on your own
+machine — no OpenAI, no API keys, no data leaving the box. It ingests your
+documents and answers questions about them in plain language, grounded in the
+actual text it retrieves. Built to run **CPU-only** on modest hardware.
 
-## Architecture
+- **Qdrant** — vector database (stores text as searchable "meaning" vectors)
+- **Ollama** — runs the local models: embeddings + the LLM
+- **FastAPI** — the service that orchestrates the two into a RAG loop
+- **Docker Compose** — one command brings the whole thing up
+
+## What is RAG, and why?
+
+An LLM only knows what it was trained on — it has never seen *your* documents.
+Ask it about your private notes and it will make something up. RAG fixes this by
+**retrieving the relevant part of your document first, then asking the LLM to
+answer using only that.** The answer stays grounded in your real content.
+
+## How it works
 
 ```
-   POST /ingest ──► embed (Ollama) ──► store vectors (Qdrant)
-   POST /query  ──► embed question ──► search Qdrant ──► stuff context
-                                                    └──► LLM answer (Ollama)
+INGEST (load your docs)
+  text ──► Ollama embeds it into a 768-number vector ──► stored in Qdrant
+
+QUERY (ask a question)
+  question ──► Ollama embeds it ──► Qdrant finds the closest stored chunks
+           ──► FastAPI stuffs those chunks into a prompt
+           ──► Ollama's LLM writes an answer from that context ──► you
 ```
 
-## Run it (inside the Ubuntu VM)
+An **embedding** is a list of numbers that captures the *meaning* of text.
+Similar meanings get similar numbers, so Qdrant can find "which stored chunk is
+closest to this question" — semantic search, not keyword matching. Each result
+comes back with a **score** (higher = more relevant); low scores are a signal
+the answer probably isn't in your documents.
 
-1. Install Docker + the compose plugin:
-   ```bash
-   sudo apt update && sudo apt install -y docker.io docker-compose-v2
-   sudo usermod -aG docker $USER && newgrp docker
-   ```
+## Run it
 
-2. Bring the stack up:
-   ```bash
-   docker compose up -d --build
-   ```
+Inside an Ubuntu box (a local VM is perfect):
 
-3. Pull the models **into the Ollama container** (one-time, downloads once):
-   ```bash
-   docker exec -it ollama ollama pull llama3.2:1b
-   docker exec -it ollama ollama pull nomic-embed-text
-   ```
+```bash
+# 1. Install Docker + Compose v2
+sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
+sudo usermod -aG docker $USER && newgrp docker
 
-4. Check health:
-   ```bash
-   curl localhost:8000/health
-   ```
+# 2. Clone + start the stack (builds the API, pulls Qdrant + Ollama images)
+git clone https://github.com/Rizwan-Riasat/rag-stack.git
+cd rag-stack
+docker compose up -d --build
+
+# 3. Pull the models into the running Ollama container (one-time download)
+docker compose exec ollama ollama pull llama3.2:3b
+docker compose exec ollama ollama pull nomic-embed-text
+
+# 4. Health check
+curl localhost:8000/health          # -> {"status":"ok"}
+```
+
+> **Tip:** on a flaky connection the big Ollama image pull can reset. This
+> auto-retries until it succeeds: `until docker pull ollama/ollama:latest; do sleep 5; done`
 
 ## Use it
 
-Ingest some documents:
+**Ingest a whole file** (chunks it and loads every piece):
+
 ```bash
-curl -X POST localhost:8000/ingest \
-  -H 'content-type: application/json' \
-  -d '{"texts": [
-        "Qdrant is an open-source vector database written in Rust.",
-        "Ollama runs large language models locally via a simple HTTP API.",
-        "Rizwan is doing a two-month DevOps + AWS career push."
-      ]}'
+python3 ingest_file.py server-setup.md
 ```
 
-Ask a question:
+**Or ingest raw text directly:**
+
 ```bash
-curl -X POST localhost:8000/query \
-  -H 'content-type: application/json' \
+curl -X POST localhost:8000/ingest -H 'content-type: application/json' \
+  -d '{"texts": ["Qdrant is an open-source vector database written in Rust."]}'
+```
+
+**Ask a question:**
+
+```bash
+curl -X POST localhost:8000/query -H 'content-type: application/json' \
   -d '{"question": "What language is Qdrant written in?"}'
 ```
+
+Response includes the `answer` and the `sources` it retrieved (with scores).
+
+## Configuration
+
+Copy `.env.example` to `.env` to change models:
+
+```bash
+cp .env.example .env      # then edit LLM_MODEL / EMBED_MODEL
+docker compose up -d api  # recreate the API to pick up changes
+```
+
+Default LLM is `llama3.2:3b` (good answers, ~2GB RAM). See `.env.example` for
+smaller/faster options.
+
+## Endpoints
+
+| Method | Path      | Purpose                                  |
+|--------|-----------|------------------------------------------|
+| POST   | `/ingest` | Embed and store a list of texts          |
+| POST   | `/query`  | Retrieve relevant chunks + LLM answer    |
+| GET    | `/health` | Liveness check                           |
 
 ## Notes
 
 - First `/query` after boot is slow — Ollama loads the model into RAM on first
-  use. Subsequent calls are faster.
+  use, then stays warm.
 - Qdrant dashboard: `http://localhost:6333/dashboard`
 - Data persists in the `qdrant_data` and `ollama_data` Docker volumes.
 
-## Next step
+## Roadmap
 
-Once this works locally, deploy the identical `docker-compose.yml` to a small
-AWS EC2 instance via Terraform — that's the cloud/portfolio version.
+- [ ] Deploy the identical stack to AWS EC2 via **Terraform** (the cloud/IaC version)
+- [ ] Auto-pull models on first boot (init step) so setup is a single command
+- [ ] Manual rebuild without Docker (systemd units + nginx) as a second learning pass

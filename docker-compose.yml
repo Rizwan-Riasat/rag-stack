@@ -23,7 +23,7 @@ services:
     environment:
       - QDRANT_URL=http://qdrant:6333
       - OLLAMA_URL=http://ollama:11434
-      - LLM_MODEL=${LLM_MODEL:-llama3.2:1b}
+      - LLM_MODEL=${LLM_MODEL:-llama3.2:3b}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
     depends_on:
       - qdrant
