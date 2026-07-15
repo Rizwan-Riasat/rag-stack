@@ -86,8 +86,9 @@ async def query(req: QueryReq):
     hits = result.points
     context = "\n\n".join(h.payload["text"] for h in hits)
     prompt = (
-        "Answer the question using ONLY the context below. "
-        "If the answer isn't in the context, say you don't know.\n\n"
+        "Use the context below to answer the question. "
+        "The answer is likely contained in the context, so read it carefully. "
+        "Only say you don't know if the context truly has no relevant information.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {req.question}\nAnswer:"
     )
