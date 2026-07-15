@@ -80,9 +80,10 @@ async def query(req: QueryReq):
     """The RAG loop: embed question -> retrieve top_k -> stuff into prompt -> answer."""
     ensure_collection()
     qvec = await embed(req.question)
-    hits = qdrant.search(
-        collection_name=COLLECTION, query_vector=qvec, limit=req.top_k
+    result = qdrant.query_points(
+        collection_name=COLLECTION, query=qvec, limit=req.top_k
     )
+    hits = result.points
     context = "\n\n".join(h.payload["text"] for h in hits)
     prompt = (
         "Answer the question using ONLY the context below. "
