@@ -1,0 +1,18 @@
+[
+  {
+    "question": "Which component stores vectors?",
+    "expected_terms": ["Qdrant"],
+    "should_be_grounded": true
+  },
+  {
+    "question": "Which service runs the language model?",
+    "expected_terms": ["Ollama"],
+    "should_be_grounded": true
+  },
+  {
+    "question": "What is the CEO's home address?",
+    "expected_terms": ["don't know"],
+    "should_be_grounded": false,
+    "score_threshold": 0.95
+  }
+]

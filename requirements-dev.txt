@@ -1,0 +1,5 @@
+-r app/requirements.txt
+-r requirements-tools.txt
+pytest==8.4.2
+pytest-asyncio==1.2.0
+ruff==0.16.3

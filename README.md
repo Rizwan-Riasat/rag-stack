@@ -1,118 +1,213 @@
-# Self-Hosted RAG Stack (Qdrant + Ollama + FastAPI)
+# Private RAG Stack — PDF Q&A with Citations
 
-A **Retrieval-Augmented Generation** pipeline that runs entirely on your own
-machine — no OpenAI, no API keys, no data leaving the box. It ingests your
-documents and answers questions about them in plain language, grounded in the
-actual text it retrieves. Built to run **CPU-only** on modest hardware.
+[![CI](https://github.com/Rizwan-Riasat/rag-stack/actions/workflows/ci.yml/badge.svg)](https://github.com/Rizwan-Riasat/rag-stack/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Qdrant](https://img.shields.io/badge/Qdrant-vector%20search-DC244C)](https://qdrant.tech/)
+[![Ollama](https://img.shields.io/badge/Ollama-local%20inference-black)](https://ollama.com/)
 
-- **Qdrant** — vector database (stores text as searchable "meaning" vectors)
-- **Ollama** — runs the local models: embeddings + the LLM
-- **FastAPI** — the service that orchestrates the two into a RAG loop
-- **Docker Compose** — one command brings the whole thing up
+> A self-hosted retrieval-augmented generation system that ingests PDF, Markdown, and text documents, retrieves relevant passages with Qdrant, and produces grounded local answers through Ollama—with page-level sources and no external AI API.
 
-## What is RAG, and why?
+## What makes this more than an LLM wrapper
 
-An LLM only knows what it was trained on — it has never seen *your* documents.
-Ask it about your private notes and it will make something up. RAG fixes this by
-**retrieving the relevant part of your document first, then asking the LLM to
-answer using only that.** The answer stays grounded in your real content.
+- Local embedding and generation models; document contents are not sent to a hosted AI provider.
+- PDF-aware ingestion preserves filename, page number, document identity, and chunk position.
+- Deterministic chunk IDs prevent duplicate points when the same document is ingested again.
+- A configurable similarity threshold refuses unsupported questions instead of forcing an answer.
+- Answers include inline source references and structured retrieval evidence.
+- Qdrant and Ollama remain private on the Docker network; the API binds to localhost.
+- Optional constant-time API-key verification protects ingestion, query, and document-management routes.
+- Health, readiness, tests, CI, and a transparent evaluation set make behavior observable.
 
-## How it works
+## Architecture
 
+```mermaid
+flowchart LR
+    classDef client fill:#172554,stroke:#60a5fa,color:#fff,stroke-width:2px
+    classDef api fill:#042f2e,stroke:#2dd4bf,color:#fff,stroke-width:2px
+    classDef data fill:#4c0519,stroke:#fb7185,color:#fff,stroke-width:2px
+    classDef model fill:#292524,stroke:#fbbf24,color:#fff,stroke-width:2px
+
+    PDF[PDF / Markdown / text]:::client --> INGEST[Extractor + overlap chunker<br/>source and page metadata]:::client
+    INGEST -->|POST /ingest| API[FastAPI orchestration<br/>validation + optional auth]:::api
+    API -->|batch embeddings| OLLAMA[Ollama<br/>nomic-embed-text + llama3.2]:::model
+    API -->|vectors + payload| QDRANT[(Qdrant<br/>cosine vector search)]:::data
+    USER[Question]:::client -->|POST /query| API
+    API -->|top-k + score threshold| QDRANT
+    QDRANT -->|relevant chunks| API
+    API -->|grounded prompt| OLLAMA
+    OLLAMA -->|answer| API
+    API -->|answer + citations + scores| USER
 ```
-INGEST (load your docs)
-  text ──► Ollama embeds it into a 768-number vector ──► stored in Qdrant
 
-QUERY (ask a question)
-  question ──► Ollama embeds it ──► Qdrant finds the closest stored chunks
-           ──► FastAPI stuffs those chunks into a prompt
-           ──► Ollama's LLM writes an answer from that context ──► you
-```
+See [docs/architecture.md](docs/architecture.md) for trust boundaries and request sequences.
 
-An **embedding** is a list of numbers that captures the *meaning* of text.
-Similar meanings get similar numbers, so Qdrant can find "which stored chunk is
-closest to this question" — semantic search, not keyword matching. Each result
-comes back with a **score** (higher = more relevant); low scores are a signal
-the answer probably isn't in your documents.
+## Quick start
 
-## Run it
-
-Inside an Ubuntu box (a local VM is perfect):
+Requirements: Docker Engine with Compose v2, roughly 4 GiB free RAM for the default model, and Python 3.10+ for the ingestion client.
 
 ```bash
-# 1. Install Docker + Compose v2
-sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
-sudo usermod -aG docker $USER && newgrp docker
-
-# 2. Clone + start the stack (builds the API, pulls Qdrant + Ollama images)
 git clone https://github.com/Rizwan-Riasat/rag-stack.git
 cd rag-stack
+cp .env.example .env
 docker compose up -d --build
 
-# 3. Pull the models into the running Ollama container (one-time download)
 docker compose exec ollama ollama pull llama3.2:3b
 docker compose exec ollama ollama pull nomic-embed-text
-
-# 4. Health check
-curl localhost:8000/health          # -> {"status":"ok"}
+curl -fsS http://localhost:8000/ready
 ```
 
-> **Tip:** on a flaky connection the big Ollama image pull can reset. This
-> auto-retries until it succeeds: `until docker pull ollama/ollama:latest; do sleep 5; done`
+The default API is accessible only from the host at `http://127.0.0.1:8000`. Qdrant and Ollama have no host-published ports.
 
-## Use it
+## Ingest a PDF
 
-**Ingest a whole file** (chunks it and loads every piece):
+Install the small local PDF tool dependency, then ingest a document you are authorized to process:
 
 ```bash
-python3 ingest_file.py server-setup.md
+python3 -m pip install -r requirements-tools.txt
+python3 ingest_file.py ./example.pdf --dry-run
+python3 ingest_file.py ./example.pdf
 ```
 
-**Or ingest raw text directly:**
+The ingester:
+
+1. Extracts text page by page.
+2. Creates paragraph-aware chunks with overlap.
+3. Calculates a content-derived document ID.
+4. Adds source, page, and chunk metadata.
+5. Sends bounded batches to the API.
+
+Scanned PDFs without a text layer are detected and reported as requiring OCR rather than silently ingesting empty pages.
+
+## Ask a cited question
 
 ```bash
-curl -X POST localhost:8000/ingest -H 'content-type: application/json' \
-  -d '{"texts": ["Qdrant is an open-source vector database written in Rust."]}'
+curl -sS http://localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What does the document say about backups?","top_k":4}'
 ```
 
-**Ask a question:**
+Example response shape:
+
+```json
+{
+  "answer": "The documented backup runs daily [SOURCE 1].",
+  "grounded": true,
+  "sources": [
+    {
+      "source": "example.pdf",
+      "document_id": "example-a1b2c3d4e5f6a7b8",
+      "page": 7,
+      "chunk_index": 12,
+      "score": 0.7821,
+      "text": "..."
+    }
+  ]
+}
+```
+
+If no chunk meets the threshold, the API returns `grounded: false`, no sources, and: `I don't know based on the indexed documents.`
+
+## Manage indexed documents
 
 ```bash
-curl -X POST localhost:8000/query -H 'content-type: application/json' \
-  -d '{"question": "What language is Qdrant written in?"}'
+curl -sS http://localhost:8000/documents
+curl -X DELETE http://localhost:8000/documents/<document-id>
 ```
 
-Response includes the `answer` and the `sources` it retrieved (with scores).
-
-## Configuration
-
-Copy `.env.example` to `.env` to change models:
+Legacy ingestion remains supported:
 
 ```bash
-cp .env.example .env      # then edit LLM_MODEL / EMBED_MODEL
-docker compose up -d api  # recreate the API to pick up changes
+curl -X POST http://localhost:8000/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"texts":["Qdrant is the vector database used by this stack."]}'
 ```
 
-Default LLM is `llama3.2:3b` (good answers, ~2GB RAM). See `.env.example` for
-smaller/faster options.
+## Optional API authentication
 
-## Endpoints
+Generate a secret locally and place it in `.env`—never commit it:
 
-| Method | Path      | Purpose                                  |
-|--------|-----------|------------------------------------------|
-| POST   | `/ingest` | Embed and store a list of texts          |
-| POST   | `/query`  | Retrieve relevant chunks + LLM answer    |
-| GET    | `/health` | Liveness check                           |
+```bash
+openssl rand -hex 32
+```
 
-## Notes
+Set `RAG_API_KEY=<generated-value>`, recreate the API, and send `X-API-Key` on protected requests. `ingest_file.py` reads the value from the `RAG_API_KEY` environment variable. Health endpoints intentionally remain unauthenticated for container monitoring.
 
-- First `/query` after boot is slow — Ollama loads the model into RAM on first
-  use, then stays warm.
-- Qdrant dashboard: `http://localhost:6333/dashboard`
-- Data persists in the `qdrant_data` and `ollama_data` Docker volumes.
+This lightweight mechanism is suitable for a private host. For internet exposure, use TLS, a proper identity-aware reverse proxy, rate limiting, and network controls; see [SECURITY.md](SECURITY.md).
+
+## API surface
+
+| Method | Path | Purpose | Protected when key set |
+|---|---|---|---|
+| `POST` | `/ingest` | Embed and upsert chunks | Yes |
+| `POST` | `/query` | Retrieve and answer with sources | Yes |
+| `GET` | `/documents` | Summarize indexed documents | Yes |
+| `DELETE` | `/documents/{id}` | Delete every chunk for a document | Yes |
+| `GET` | `/health` | API liveness | No |
+| `GET` | `/ready` | Qdrant and Ollama readiness | No |
+| `GET` | `/docs` | Interactive OpenAPI documentation | No |
+
+## Quality controls
+
+Run deterministic unit tests:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+pytest -q
+```
+
+Run the live smoke evaluation after starting the stack:
+
+```bash
+python3 ingest_file.py eval/knowledge.md
+python3 eval/run_eval.py
+```
+
+The included evaluation checks supported questions and an out-of-scope refusal. It is deliberately small and transparent—not presented as a production benchmark. Expand it with representative, non-sensitive domain questions before comparing models or retrieval settings. See [docs/evaluation.md](docs/evaluation.md).
+
+## Reliability and security decisions
+
+| Risk | Control |
+|---|---|
+| Hallucination from weak retrieval | Similarity cutoff plus explicit refusal path |
+| Missing provenance | Source filename, page, chunk index, scores, and inline citations |
+| Duplicate ingestion | Stable UUID derived from document/chunk identity and content |
+| Unbounded requests | Pydantic limits for text, batches, questions, and `top_k` |
+| Prompt injection in documents | Delimited source blocks and instruction/data separation |
+| Exposed backing services | Qdrant/Ollama use `expose`, not host `ports` |
+| Dependency drift | Exact Python, Qdrant, and Ollama versions |
+| False-positive health | Separate liveness and dependency-aware readiness endpoints |
+| Container privilege | Non-root API user, read-only filesystem, `no-new-privileges` |
+
+Prompt injection defenses reduce risk but do not make arbitrary hostile documents safe. Treat uploaded documents as untrusted data and apply authorization outside this single-user reference stack.
+
+## Repository map
+
+```text
+.
+├── app/                    # FastAPI service and pinned runtime
+├── docs/                   # Architecture, evaluation, and operations
+├── eval/                   # Small transparent live evaluation set
+├── tests/                  # Deterministic unit tests
+├── .github/workflows/      # CI checks
+├── docker-compose.yml      # Hardened local orchestration
+├── ingest_file.py          # PDF/Markdown/text ingestion client
+└── requirements-*.txt      # Tooling and development dependencies
+```
+
+## Current scope
+
+This is a single-node, single-user reference implementation. It does not yet provide multi-tenancy, OCR, hybrid BM25/vector search, reranking, GPU scheduling, distributed workers, or production identity management. Those are explicit future extensions, not hidden limitations.
 
 ## Roadmap
 
-- [ ] Deploy the identical stack to AWS EC2 via **Terraform** (the cloud/IaC version)
-- [ ] Auto-pull models on first boot (init step) so setup is a single command
-- [ ] Manual rebuild without Docker (systemd units + nginx) as a second learning pass
+- [ ] Terraform deployment to AWS EC2 with encrypted persistent volumes
+- [ ] TLS reverse proxy, rate limiting, and identity-aware access
+- [ ] OCR pipeline for scanned PDFs
+- [ ] Hybrid retrieval and cross-encoder reranking
+- [ ] Prometheus metrics, dashboards, and backup/restore automation
+- [ ] Larger domain-specific evaluation suite and regression thresholds
+
+## License
+
+[MIT](LICENSE)
